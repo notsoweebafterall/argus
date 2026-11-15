@@ -1,0 +1,29 @@
+{
+  "name": "run_eda",
+  "purpose": "Runs the Data Agent's standard validation and exploratory data analysis sequence.",
+  "when_to_use": "When a new dataset variant is loaded or schema, data distributions, and class balance need initial validation.",
+  "inputs": [
+    "variant"
+  ],
+  "outputs": [
+    "dataset_path",
+    "row_count",
+    "column_count",
+    "class_balance",
+    "missing_values"
+  ],
+  "mcp_tools_called": [
+    "load_dataset",
+    "inspect_dataset",
+    "run_sql"
+  ],
+  "constraints": [
+    "Target column fraud_bool and time column month must exist in dataset",
+    "Dataset operations are read-only"
+  ],
+  "failure_conditions": [
+    "Dataset variant file does not exist",
+    "Required columns are missing from schema",
+    "Invalid SQL syntax in run_sql invocation"
+  ]
+}

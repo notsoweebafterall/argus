@@ -1,0 +1,33 @@
+{
+  "name": "train_and_evaluate_baseline",
+  "purpose": "Executes the Feature-to-ML sequence to engineer features, train a baseline model, and evaluate performance.",
+  "when_to_use": "When tabular dataset is validated and an initial trained model baseline is required.",
+  "inputs": [
+    "dataset_path",
+    "model_type",
+    "feature_spec",
+    "hyperparams"
+  ],
+  "outputs": [
+    "feature_set_path",
+    "train_set_path",
+    "eval_set_path",
+    "model_id",
+    "scores",
+    "manifest"
+  ],
+  "mcp_tools_called": [
+    "create_features",
+    "train_model",
+    "evaluate_model"
+  ],
+  "constraints": [
+    "Target leakage check: fraud_bool must never be included in feature set",
+    "Evaluation metrics must enforce pr_auc for imbalanced fraud classification"
+  ],
+  "failure_conditions": [
+    "Target column included in feature_spec (leakage detected)",
+    "Unknown model_type requested",
+    "Model training convergence failure"
+  ]
+}

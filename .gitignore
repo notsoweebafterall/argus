@@ -1,0 +1,67 @@
+# Python / Environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+
+# Python packaging
+*.egg-info/
+dist/
+build/
+
+# Secrets & Environment Variables
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# IDE / Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+
+# MLflow / Experiments Local Artifacts
+mlruns/
+experiments/
+experiments/*.db
+experiments/models/*.joblib
+
+# Model artifacts
+*.pt
+*.pth
+*.pkl
+
+# Local datasets (review before committing)
+data/raw/
+data/processed/
+data/features/
+data/*.csv
+
+# Local databases
+*.sqlite
+*.sqlite3
+
+# Keep empty data directory
+!data/.gitkeep
+
+# Production logs
+monitoring/prediction_log.jsonl
+
+# Private interview preparation
+docs/interview-defence.md
+resume-bullets.md
+
+# Logs and outputs
+logs/
+outputs/
+artifacts/
+
+# OS
+.DS_Store
+Thumbs.db
+
