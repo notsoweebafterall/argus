@@ -22,7 +22,7 @@ from pipeline.orchestrator import run_task
 from agents.llm import MockLLMClient
 import app_handlers
 
-# --- 2. DEMO MONKEYPATCH (Must be before run_task is called, but after imports) ---
+# --- 2. DEMO MONKEYPATCH ---
 _orig_critic_run = CriticAgent.run
 def _demo_critic_run(self, agent_input):
     if (agent_input.context.get("model_training_artifact") or {}).get("model_id") == "model_demo_123":
@@ -97,6 +97,11 @@ def generate_html_report(state, report, mlops, model_training, feature_eng, crit
         plt.close(fig)
         cm_base64 = base64.b64encode(buf.getvalue()).decode()
 
+    # Safe extraction of critic verdict
+    verdict_str = "N/A"
+    if critic_rec and critic_rec.output.artifact:
+        verdict_str = critic_rec.output.artifact.get('verdict', 'N/A').upper()
+
     # Build HTML
     html = f"""
     <html>
@@ -122,7 +127,7 @@ def generate_html_report(state, report, mlops, model_training, feature_eng, crit
             <div class="flex">
                 <div>
                     <p><strong>Winning Model:</strong> {mlops.get('model_id', 'N/A')} ({model_training.get('model_type', 'N/A')})</p>
-                    <p><strong>Critic Verdict:</strong> {critic_rec.output.artifact.get('verdict', 'N/A').upper()}</p>
+                    <p><strong>Critic Verdict:</strong> {verdict_str}</p>
                     <p><strong>Eval PR-AUC:</strong> <span class="metric">{pr_auc:.4f}</span></p>
                     <p><strong>Recall @ 5% FPR:</strong> <span class="metric">{rec:.4f}</span></p>
                 </div>
@@ -139,16 +144,17 @@ def generate_html_report(state, report, mlops, model_training, feature_eng, crit
 
         <div class="card">
             <h2>Critic Validation & RAG</h2>
-            <p>The deterministic Critic system issued a <strong>{critic_rec.output.artifact.get('verdict', 'N/A').upper()}</strong> verdict.</p>
+            <p>The deterministic Critic system issued a <strong>{verdict_str}</strong> verdict.</p>
     """
 
     # Add RAG citations
-    retrieved = critic_rec.output.artifact.get("retrieved_similar_failures", [])
-    if retrieved:
-        html += "<h3>Similar Past Failures Consulted (RAG):</h3><ul>"
-        for m in retrieved:
-            html += f"<li>Run <code>{m['run_id'][:8]}</code> (Similarity: {m['score']:.2f})</li>"
-        html += "</ul>"
+    if critic_rec and critic_rec.output.artifact:
+        retrieved = critic_rec.output.artifact.get("retrieved_similar_failures", [])
+        if retrieved:
+            html += "<h3>Similar Past Failures Consulted (RAG):</h3><ul>"
+            for m in retrieved:
+                html += f"<li>Run <code>{m['run_id'][:8]}</code> (Similarity: {m['score']:.2f})</li>"
+            html += "</ul>"
 
     html += """
         </div>
@@ -232,7 +238,7 @@ for rec in state.stage_history:
     with st.expander(f"{icon} {rec.stage} — {rec.output.status}"):
         st.write(rec.output.rationale)
 
-# 2. Critic & RAG
+# 2. Critic & RAG (Safe Check)
 critic_rec = next((r for r in state.stage_history if r.stage == "critic_review"), None)
 if critic_rec and critic_rec.output.artifact:
     st.subheader("Critic Validation")
@@ -270,7 +276,7 @@ with col_b:
             st.write("**Model comparison (PR-AUC)**")
             st.bar_chart({"PR-AUC": {r["model"]: r["PR-AUC"] for r in rows if r["PR-AUC"] is not None}})
 
-# 4. Model Artifacts & Downloads
+# 4. Model Artifacts & Downloads (Safe Check)
 report = state.final_report or {}
 mlops = report.get("mlops_registration") or {}
 model_training = report.get("model_training") or {}
@@ -280,7 +286,7 @@ st.subheader("Model & Downloads")
 c1, c2, c3 = st.columns(3)
 c1.metric("Model ID", mlops.get("model_id", "—"))
 c2.metric("PR-AUC", model_training.get("eval_metrics", {}).get("pr_auc", "—"))
-c3.metric("Verdict", critic_rec.output.artifact.get("verdict", "—") if critic_rec else "—")
+c3.metric("Verdict", critic_rec.output.artifact.get("verdict", "—") if critic_rec and critic_rec.output.artifact else "—")
 
 # HTML Report
 st.write("**Download Comprehensive HTML Report**")
