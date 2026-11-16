@@ -1,10 +1,9 @@
-"""Argus ML — Streamlit product surface (v1 + upload).
+"""Argus ML — Streamlit product surface (v1 + upload + visualizations).
 
 Run: streamlit run app.py
 """
 from __future__ import annotations
 
-import io
 import json
 import os
 import uuid
@@ -15,6 +14,7 @@ import streamlit as st
 
 from pipeline.orchestrator import run_task
 from agents.llm import MockLLMClient
+import app_handlers
 
 UPLOAD_DIR = Path("data/uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -111,9 +111,16 @@ if run_btn:
             "pipeline now, or save your upload and come back after v2."
         )
     else:
+        # Set the variant on the handler's shared state BEFORE the run.
+        app_handlers.reset()
+        app_handlers._state["variant"] = variant
+
         with st.status("Running Argus pipeline...", expanded=True) as status:
             st.write("Data validation → Feature engineering → Model training → Critic review → MLOps")
-            state = run_task(variant, llm_client=None)
+            state = run_task(
+                variant,
+                llm_client=MockLLMClient(handler=app_handlers.demo_pipeline_handler),
+            )
             status.update(
                 label=f"Pipeline {state.status}",
                 state="complete" if state.status == "completed" else "error",
@@ -154,6 +161,66 @@ if critic_rec and critic_rec.output.artifact:
             st.write(f"Run `{str(m.get('run_id',''))[:8]}` — similarity {m.get('score',0):.2f}")
             st.json(m.get("failed_checks", []))
 
+# ---------------------------------------------------------------------------
+# Visualizations (from existing artifacts — no backend change)
+# ---------------------------------------------------------------------------
+st.subheader("Visual Analysis")
+
+data_rec = next((r for r in state.stage_history if r.stage == "data_validation"), None)
+ml_rec = next((r for r in state.stage_history if r.stage == "model_training"), None)
+
+col_a, col_b = st.columns(2)
+
+# Class balance
+with col_a:
+    if data_rec and data_rec.output.artifact:
+        cb = (data_rec.output.artifact.get("validation") or {}).get("class_balance") or {}
+        if cb:
+            st.write("**Class balance**")
+            st.bar_chart({"count": {str(k): int(v) for k, v in cb.items()}})
+
+# Missingness (sentinel)
+with col_b:
+    if data_rec and data_rec.output.artifact:
+        sm = (data_rec.output.artifact.get("validation") or {}).get("sentinel_missing_counts") or {}
+        if sm:
+            st.write("**Sentinel-missing counts**")
+            st.bar_chart({"count": {str(k): int(v) for k, v in sm.items()}})
+
+# Model comparison
+if ml_rec and ml_rec.output.artifact:
+    candidates = ml_rec.output.artifact.get("candidates_considered") or []
+    if candidates:
+        st.write("**Model comparison (eval metrics)**")
+        rows = []
+        for c in candidates:
+            m = c.get("eval_metrics") or {}
+            rows.append({
+                "model": c.get("model_type", "?"),
+                "PR-AUC": m.get("pr_auc"),
+                "Recall@5%FPR": m.get("recall_at_fixed_fpr"),
+                "Precision": m.get("precision"),
+                "Recall": m.get("recall"),
+            })
+        st.dataframe(rows, use_container_width=True)
+        pr_auc_series = {r["model"]: r["PR-AUC"] for r in rows if r["PR-AUC"] is not None}
+        if pr_auc_series:
+            st.bar_chart({"PR-AUC": pr_auc_series})
+
+# RAG similarity
+if critic_rec and critic_rec.output.artifact:
+    retrieved = critic_rec.output.artifact.get("retrieved_similar_failures", [])
+    if retrieved:
+        st.write("**RAG similarity to past failures**")
+        sim_series = {
+            f"run {str(m.get('run_id',''))[:8]}": float(m.get("score", 0))
+            for m in retrieved
+        }
+        st.bar_chart({"similarity": sim_series})
+
+# ---------------------------------------------------------------------------
+# Model & Artifacts
+# ---------------------------------------------------------------------------
 report = state.final_report or {}
 mlops = report.get("mlops_registration") or {}
 model_training = report.get("model_training") or {}
