@@ -200,16 +200,26 @@ class Orchestrator:
                 if verdict in ("approve", "reject"):
                     critic_verdict = verdict
                     run_id = (
-                        ctx.get("run_id")
-                        or (stage_artifacts.get("model_training") or {}).get("run_id")
-                        or (stage_artifacts.get("model_training") or {}).get("mlflow_run_id")
+                            ctx.get("run_id")
+                            or (stage_artifacts.get("model_training") or {}).get("run_id")
+                            or (stage_artifacts.get("model_training") or {}).get("mlflow_run_id")
                     )
                     if run_id:
                         try:
                             from tools.ml_tools import update_critic_verdict_tag
-                            update_critic_verdict_tag(run_id=run_id, verdict=verdict)
+                            update_critic_verdict_tag(
+                                run_id=run_id,
+                                verdict=verdict,
+                                failed_checks=agent_output.artifact.get("failed_checks"),
+                                rationale=agent_output.rationale,
+                            )
                         except Exception as exc:
                             logger.warning(f"Could not update critic_verdict tag on MLflow run '{run_id}': {exc}")
+                    else:
+                        logger.warning(
+                            f"Critic verdict '{verdict}' computed but no MLflow run_id found; "
+                            "skipping tag. This run will not seed the retrieval corpus."
+                        )
 
             # Record stage execution
             record = StageRecord(

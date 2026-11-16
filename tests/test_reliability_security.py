@@ -56,11 +56,19 @@ def test_tool_permission_scoping_least_privilege():
 
     ml_agent = MLAgent(llm_client=mock_llm)
     ml_tools = {t.name for t in ml_agent.tools}
-    expected_ml_tools = {"train_model", "search_hyperparams", "evaluate_model", "save_model", "load_model"}
+    expected_ml_tools = {
+        "train_model",
+        "search_hyperparams",
+        "evaluate_model",
+        "save_model",
+        "load_model",
+        "retrieve_similar_failures",  # RAG tool: read-only retrieval over past failures
+    }
     assert ml_tools == expected_ml_tools
-    assert "write_file" not in ml_tools
-    assert "load_dataset" not in ml_tools
+    # Retrieval is read-only; ML Agent must not gain write/exec/registration tools.
     assert "run_python" not in ml_tools
+    assert "write_file" not in ml_tools
+    assert "register_model" not in ml_tools
 
     critic_agent = CriticAgent(llm_client=mock_llm)
     assert critic_agent.tools == []  # Pure deterministic code audit, no external tool capabilities

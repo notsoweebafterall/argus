@@ -375,3 +375,34 @@ def test_critic_fairness_empty_group_check(clean_pipeline_artifacts):
 
     assert output.artifact["verdict"] == "reject"
     assert any(fc["check_name"] == "fairness_groups_non_empty" for fc in output.artifact["failed_checks"])
+
+def test_critic_cites_similar_past_failure_on_reject(clean_pipeline_artifacts, monkeypatch):
+    """When retrieval returns a matching past failure, the critic cites it in rationale and artifact."""
+    from tools import retrieval_tools
+
+    monkeypatch.setattr(
+        retrieval_tools,
+        "retrieve_similar_failures",
+        lambda query, k=3: {
+            "matches": [
+                {
+                    "run_id": "run_abc123",
+                    "score": 0.91,
+                    "failed_checks": [
+                        {"check_name": "sentinel_missing_threshold", "category": "data"}
+                    ],
+                }
+            ]
+        },
+        raising=False,
+    )
+
+    critic = CriticAgent()
+    bad_context = dict(clean_pipeline_artifacts)
+    bad_context["data_validation_artifact"]["validation"]["severity"] = "critical"
+
+    out = critic.run(AgentInput(task_id="t", stage="critic_review", system_prompt="", context=bad_context))
+
+    assert out.artifact["verdict"] == "reject"
+    assert out.artifact["retrieved_similar_failures"]  # non-empty
+    assert "run_abc123" in out.rationale

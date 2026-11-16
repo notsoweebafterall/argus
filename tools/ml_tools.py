@@ -1062,16 +1062,33 @@ CHECK_FAIRNESS_SPEC = ToolSpec(
     handler=check_fairness,
 )
 
-def update_critic_verdict_tag(run_id: str, verdict: str) -> None:
-    """Update existing MLflow run with critic_verdict tag ('approve' or 'reject')."""
+def update_critic_verdict_tag(
+    run_id: str,
+    verdict: str,
+    failed_checks: list[dict[str, Any]] | None = None,
+    rationale: str | None = None,
+) -> None:
+    """Update existing MLflow run with critic_verdict tag and (optionally) failed_checks + rationale.
+
+    Persisting failed_checks is what makes the critic-failure corpus buildable:
+    retrieval_tools.build_critic_failure_corpus() reads tags.critic_failed_checks.
+    """
     if not run_id:
         return
     _init_mlflow()
     try:
         with mlflow.start_run(run_id=run_id):
             mlflow.set_tag("critic_verdict", verdict)
-    except Exception:
-        pass
+            if failed_checks is not None:
+                mlflow.set_tag("critic_failed_checks", json.dumps(failed_checks))
+            if rationale:
+                mlflow.set_tag("critic_rationale", rationale[:5000])  # tag size guard
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            f"update_critic_verdict_tag FAILED for run_id={run_id!r}: "
+            f"{type(exc).__name__}: {exc}"
+        )
 
 
 def register_model(

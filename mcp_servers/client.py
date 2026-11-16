@@ -30,6 +30,7 @@ TOOL_TO_SERVER_MAP: dict[str, str] = {
     "run_python": "system_mcp",
     "write_file": "system_mcp",
     "read_file": "system_mcp",
+    "retrieve_similar_failures": "retrieval_mcp",
 }
 
 
@@ -52,6 +53,9 @@ class MCPClient:
             elif server_name == "system_mcp":
                 from mcp_servers.system_mcp.server import system_mcp_server
                 self._servers[server_name] = system_mcp_server
+            elif server_name == "retrieval_mcp":
+                from mcp_servers.retrieval_mcp.server import retrieval_mcp_server
+                self._servers[server_name] = retrieval_mcp_server
             else:
                 raise ValueError(f"Unknown MCP server '{server_name}'")
         return self._servers[server_name]

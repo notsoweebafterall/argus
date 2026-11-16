@@ -20,6 +20,7 @@ Operational Protocol:
 5. Compare candidate performances across fraud detection metrics (primarily PR-AUC and recall_at_fixed_fpr).
 6. Select the winning model and provide a concise, numbers-grounded `selection_reason` explicitly stating the metric values that justify the choice.
 7. If every candidate's `recall_at_fixed_fpr` is suspiciously low (e.g. < 0.1) or `pr_auc` is very low, note this honestly in `rationale`.
+8. OPTIONAL RETRIEVAL: If you are about to finalize a model whose metrics resemble a previously rejected run, you MAY call `retrieve_similar_failures` with a one-sentence description of the metric profile to check for recurring failure patterns. Cite any matches in your rationale. Do not block finalization on retrieval.
 
 Output Format:
 Emit a final response in JSON containing:
@@ -66,6 +67,7 @@ class MLAgent(Agent):
             SEARCH_HYPERPARAMS_SPEC,
             TRAIN_MODEL_SPEC,
         )
+        from tools.retrieval_tools import RETRIEVE_SIMILAR_FAILURES_SPEC
 
         super().__init__(llm_client=llm_client, max_turns=max_turns)
         self.system_prompt = ML_AGENT_SYSTEM_PROMPT
@@ -75,6 +77,7 @@ class MLAgent(Agent):
             EVALUATE_MODEL_SPEC,
             SAVE_MODEL_SPEC,
             LOAD_MODEL_SPEC,
+            RETRIEVE_SIMILAR_FAILURES_SPEC,
         ])
 
     def run_stage(
