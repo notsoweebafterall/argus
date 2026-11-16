@@ -1,5 +1,6 @@
 """Argus ML — Streamlit product surface (v1 + upload + HTML Reports)."""
 from __future__ import annotations
+
 import json
 import os
 import uuid
@@ -11,7 +12,7 @@ import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import roc_curve, auc
+from sklearn.metrics import auc
 
 from pipeline.orchestrator import run_task
 from agents.llm import MockLLMClient
@@ -22,6 +23,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 st.set_page_config(page_title="Argus ML", layout="wide", page_icon="🧠")
 st.title("Argus — Autonomous ML Engineering")
+st.caption("Upload a dataset, review its profile, and run an end-to-end ML workflow.")
 
 
 # ---------------------------------------------------------------------------
@@ -43,14 +45,14 @@ def generate_html_report(state, report, mlops, model_training, feature_eng, crit
         roc_auc = auc(roc_data["fpr"], roc_data["tpr"])
         ax.plot(roc_data["fpr"], roc_data["tpr"], color='darkorange', lw=2, label=f'ROC curve (AUC = {roc_auc:.2f})')
         ax.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
-        ax.set_xlim([0.0, 1.0]);
+        ax.set_xlim([0.0, 1.0])
         ax.set_ylim([0.0, 1.05])
-        ax.set_xlabel('False Positive Rate');
+        ax.set_xlabel('False Positive Rate')
         ax.set_ylabel('True Positive Rate')
-        ax.set_title('Receiver Operating Characteristic');
+        ax.set_title('Receiver Operating Characteristic')
         ax.legend(loc="lower right")
-        buf = BytesIO();
-        fig.savefig(buf, format="png", bbox_inches="tight");
+        buf = BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight")
         plt.close(fig)
         roc_base64 = base64.b64encode(buf.getvalue()).decode()
 
@@ -59,11 +61,11 @@ def generate_html_report(state, report, mlops, model_training, feature_eng, crit
     if cm:
         fig, ax = plt.subplots(figsize=(4, 3))
         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
-        ax.set_xlabel('Predicted');
+        ax.set_xlabel('Predicted')
         ax.set_ylabel('Actual')
         ax.set_title('Confusion Matrix')
-        buf = BytesIO();
-        fig.savefig(buf, format="png", bbox_inches="tight");
+        buf = BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight")
         plt.close(fig)
         cm_base64 = base64.b64encode(buf.getvalue()).decode()
 
@@ -109,7 +111,7 @@ def generate_html_report(state, report, mlops, model_training, feature_eng, crit
 
         <div class="card">
             <h2>Critic Validation & RAG</h2>
-            <p>The deterministic Critic system issued a <strong>{critic_rec.output.artifact.get('verdict').upper()}</strong> verdict.</p>
+            <p>The deterministic Critic system issued a <strong>{critic_rec.output.artifact.get('verdict', 'N/A').upper()}</strong> verdict.</p>
     """
 
     # Add RAG citations
@@ -134,46 +136,57 @@ def generate_html_report(state, report, mlops, model_training, feature_eng, crit
 with st.sidebar:
     st.header("Configuration")
     source = st.radio("Data source", ["BAF variant", "Upload file"], horizontal=True)
+
     variant = None
     uploaded = None
+
     if source == "BAF variant":
         variant = st.selectbox("Dataset variant", ["Base", "I", "II", "III", "IV", "V"])
     else:
         uploaded = st.file_uploader("Upload dataset", type=["csv"])
 
-    run_btn = st.button("Run ML Workflow", type="primary", use_container_width=True)
+    use_live_llm = st.checkbox("Use live LLM (Groq)", value=False)
+    run_btn = st.button("Run ML Workflow", type="primary", width='stretch')
 
+# ---------------------------------------------------------------------------
+# Upload Path
+# ---------------------------------------------------------------------------
 if source == "Upload file" and uploaded is not None:
     st.subheader("Dataset Upload")
     df = pd.read_csv(uploaded)
-    st.dataframe(df.head(10), use_container_width=True)
+    st.dataframe(df.head(10), width='stretch')
 
     has_baf_schema = {"fraud_bool", "month"}.issubset(set(df.columns))
+
     if has_baf_schema:
         st.success("BAF schema detected — this upload can run the full pipeline.")
         if st.button("Run pipeline on this upload", type="primary"):
             dest = UPLOAD_DIR / f"{uuid.uuid4().hex[:8]}_{uploaded.name}"
             dest.write_bytes(uploaded.getbuffer())
+
             app_handlers.reset()
             app_handlers._state["upload_path"] = str(dest.resolve())
 
             with st.status("Running Argus pipeline...", expanded=True) as status:
                 state = run_task("uploaded", llm_client=MockLLMClient(handler=app_handlers.demo_pipeline_handler))
-                status.update(label=f"Pipeline {state.status}", state="complete")
+                status.update(label=f"Pipeline {state.status}",
+                              state="complete" if state.status == "completed" else "error")
             st.session_state["state"] = state
             st.rerun()
     else:
         st.warning("Missing 'fraud_bool' and 'month'. Generic ingestion is coming in v2.")
 
 # ---------------------------------------------------------------------------
-# Run Standard BAF Variant
+# Standard BAF Run Path
 # ---------------------------------------------------------------------------
 if run_btn and source == "BAF variant":
     app_handlers.reset()
     app_handlers._state["variant"] = variant
+
     with st.status("Running Argus pipeline...", expanded=True) as status:
+        st.write("Data validation → Feature engineering → Model training → Critic review → MLOps")
         state = run_task(variant, llm_client=MockLLMClient(handler=app_handlers.demo_pipeline_handler))
-        status.update(label=f"Pipeline {state.status}", state="complete")
+        status.update(label=f"Pipeline {state.status}", state="complete" if state.status == "completed" else "error")
     st.session_state["state"] = state
 
 # ---------------------------------------------------------------------------
@@ -181,34 +194,86 @@ if run_btn and source == "BAF variant":
 # ---------------------------------------------------------------------------
 state = st.session_state.get("state")
 if state is None:
+    st.info("Pick a BAF variant (or upload a BAF CSV) and click **Run ML Workflow**.")
     st.stop()
 
+# 1. Execution Summary (Stage by Stage)
+st.subheader("Execution Summary")
+for rec in state.stage_history:
+    icon = {"success": "✅", "failure": "❌", "needs_retry": "⚠️"}.get(rec.output.status, "•")
+    with st.expander(f"{icon} {rec.stage} — {rec.output.status}"):
+        st.write(rec.output.rationale)
+
+# 2. Critic & RAG
 critic_rec = next((r for r in state.stage_history if r.stage == "critic_review"), None)
+if critic_rec and critic_rec.output.artifact:
+    st.subheader("Critic Validation")
+    st.write(f"**Verdict:** `{critic_rec.output.artifact.get('verdict')}`")
+    failed = critic_rec.output.artifact.get("failed_checks", [])
+    if failed:
+        st.dataframe(failed, width='stretch')
+
+    retrieved = critic_rec.output.artifact.get("retrieved_similar_failures", [])
+    if retrieved:
+        st.subheader("Similar Past Failures (RAG)")
+        for m in retrieved:
+            st.write(f"Run `{str(m.get('run_id', ''))[:8]}` — similarity {m.get('score', 0):.2f}")
+            st.json(m.get("failed_checks", []))
+
+# 3. Visual Analysis
+st.subheader("Visual Analysis")
+data_rec = next((r for r in state.stage_history if r.stage == "data_validation"), None)
+ml_rec = next((r for r in state.stage_history if r.stage == "model_training"), None)
+
+col_a, col_b = st.columns(2)
+with col_a:
+    if data_rec and data_rec.output.artifact:
+        cb = (data_rec.output.artifact.get("validation") or {}).get("class_balance") or {}
+        if cb:
+            st.write("**Class balance**")
+            st.bar_chart({"count": {str(k): int(v) for k, v in cb.items()}})
+
+with col_b:
+    if ml_rec and ml_rec.output.artifact:
+        candidates = ml_rec.output.artifact.get("candidates_considered") or []
+        if candidates:
+            rows = [{"model": c.get("model_type"), "PR-AUC": c.get("eval_metrics", {}).get("pr_auc")} for c in
+                    candidates]
+            st.write("**Model comparison (PR-AUC)**")
+            st.bar_chart({"PR-AUC": {r["model"]: r["PR-AUC"] for r in rows if r["PR-AUC"] is not None}})
+
+# 4. Model Artifacts & Downloads
 report = state.final_report or {}
 mlops = report.get("mlops_registration") or {}
 model_training = report.get("model_training") or {}
 feature_eng = report.get("feature_engineering") or {}
 
-st.subheader("Results")
-col1, col2, col3 = st.columns(3)
-col1.metric("Model ID", mlops.get("model_id", "—"))
-col2.metric("PR-AUC", model_training.get("eval_metrics", {}).get("pr_auc", "—"))
-col3.metric("Critic Verdict", critic_rec.output.artifact.get("verdict", "—") if critic_rec else "—")
+st.subheader("Model & Downloads")
+c1, c2, c3 = st.columns(3)
+c1.metric("Model ID", mlops.get("model_id", "—"))
+c2.metric("PR-AUC", model_training.get("eval_metrics", {}).get("pr_auc", "—"))
+c3.metric("Verdict", critic_rec.output.artifact.get("verdict", "—") if critic_rec else "—")
 
-st.subheader("Downloads")
-st.write("Generate a comprehensive HTML report containing charts, metrics, and validation results.")
+# HTML Report
+st.write("**Download Comprehensive HTML Report**")
 html_report = generate_html_report(state, report, mlops, model_training, feature_eng, critic_rec)
 st.download_button(
-    label="📄 Download Full HTML Report",
+    label="📄 Download Full HTML Report (with ROC & Confusion Matrix)",
     data=html_report,
     file_name=f"Argus_Report_{state.task_id}.html",
     mime="text/html",
     type="primary",
-    use_container_width=True
+    width='stretch'
 )
 
-# Raw artifacts
-st.write("Raw Artifacts:")
-if model_training.get("model_path") and Path(model_training["model_path"]).exists():
-    st.download_button("Trained Model (.joblib)", Path(model_training["model_path"]).read_bytes(),
-                       file_name="model.joblib")
+# Raw Artifacts
+st.write("**Download Raw Artifacts**")
+col_x, col_y = st.columns(2)
+with col_x:
+    if model_training.get("model_path") and Path(model_training["model_path"]).exists():
+        st.download_button("Trained Model (.joblib)", Path(model_training["model_path"]).read_bytes(),
+                           file_name="model.joblib", width='stretch')
+with col_y:
+    if feature_eng.get("eval_set_path") and Path(feature_eng["eval_set_path"]).exists():
+        st.download_button("Evaluation Data (.csv)", Path(feature_eng["eval_set_path"]).read_bytes(),
+                           file_name="eval_data.csv", width='stretch')

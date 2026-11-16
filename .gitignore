@@ -35,6 +35,7 @@ experiments/models/*.joblib
 *.pt
 *.pth
 *.pkl
+*.joblib
 
 # Local datasets (review before committing)
 data/raw/
@@ -51,15 +52,13 @@ data/*.csv
 
 # Production logs
 monitoring/prediction_log.jsonl
+logs/
+outputs/
+artifacts/
 
 # Private interview preparation
 docs/interview-defence.md
 resume-bullets.md
-
-# Logs and outputs
-logs/
-outputs/
-artifacts/
 
 # OS
 .DS_Store

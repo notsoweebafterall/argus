@@ -1,0 +1,12 @@
+.git
+.gitignore
+.venv
+__pycache__
+data/*
+!data/.gitkeep
+mlruns/
+experiments/
+.pytest_cache/
+docs/
+tests/
+eval/

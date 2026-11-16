@@ -1,6 +1,6 @@
-# Argus ML — System Architecture
+# Argus ML - System Architecture
 
-Argus is an autonomous multi-agent machine learning engineering platform designed for the Bank Account Fraud (BAF) tabular dataset. The platform executes an end-to-end ML lifecycle without manual intervention: data ingestion and deterministic validation, leakage-free temporal feature engineering, multi-candidate model training and hyperparameter search, deterministic Critic gating across quality and fairness, MLflow model registry publication, real-time FastAPI serving, and continuous production monitoring.
+Argus is an autonomous multi-agent machine learning engineering platform designed for the Bank Account Fraud (BAF) tabular dataset. The platform executes an end-to-end ML lifecycle without manual intervention: data ingestion and deterministic validation, leakage-free temporal feature engineering, multi-candidate model training and hyperparameter search, deterministic Critic gating across quality and fairness, MLflow model registry publication, real-time FastAPI serving, continuous production monitoring, and a user-facing Streamlit web interface.
 
 ---
 
@@ -8,6 +8,10 @@ Argus is an autonomous multi-agent machine learning engineering platform designe
 
 ```mermaid
 flowchart TD
+    subgraph UI Layer
+        ST["Streamlit App (app.py)<br/>CSV Upload & Run Trigger"]
+    end
+
     subgraph Data Layer
         CSV[("BAF CSV Variants<br/>(Base, I - V)")]
     end
@@ -30,11 +34,13 @@ flowchart TD
         DMCP["Data MCP Server (data_mcp)<br/>load_dataset, inspect_dataset, validate_dataset, run_eda, run_sql"]
         MLMCP["ML MCP Server (ml_mcp)<br/>create_features, train_model, search_hyperparams, evaluate_model, check_fairness, register_model, save_model, load_model"]
         SMCP["System MCP Server (system_mcp)<br/>run_python (AST/network blocked), read_file, write_file (scoped to run_id, 50MB limit)"]
+        RMCP["Retrieval MCP Server (retrieval_mcp)<br/>retrieve_similar_failures (RAG)"]
     end
 
     subgraph Storage ["Artifacts & Metadata"]
         MLFLOW[("MLflow Tracking & Registry<br/>(experiments/mlflow.db)")]
         MODELS[("Model Bundles (.joblib + .json)<br/>experiments/models/")]
+        INDEX[("Vector Index<br/>(data/retrieval/embeddings.npy)")]
     end
 
     subgraph Serving & Monitoring ["Production Tier"]
@@ -42,6 +48,10 @@ flowchart TD
         MON["Production Monitor<br/>(monitoring/monitor.py)"]
         PLOG[("Prediction Log<br/>monitoring/prediction_log.jsonl")]
     end
+
+    %% UI Trigger
+    ST -.->|Runs Pipeline| Orchestrator
+    ST -.->|Uploads CSV| CSV
 
     %% Execution flow
     CSV --> DA
@@ -61,6 +71,8 @@ flowchart TD
     MLA --- MLMCP
     CA --- MLMCP
     MOA --- MLMCP
+    CA -.->|RAG Search| RMCP
+    RMCP --- INDEX
 
     %% Serving and monitoring
     MLFLOW --> API
@@ -81,7 +93,7 @@ The system structures the machine learning engineering workflow into five specia
 | **DataAgent** | `agents/data_agent.py` | Ingests BAF dataset variant, executes deterministic validation, runs exploratory analysis (EDA), and generates structured data quality report. Enforces mandatory deterministic issue logging. | `dataset_variant`, `task_id` | `dataset_path`, `row_count`, `column_count`, `validation`, `eda`, `issues_found` |
 | **FeatureAgent** | `agents/feature_agent.py` | Generates train and evaluation feature matrices using non-configurable temporal splitting (months 0–5 train, months 6–7 eval). Drops high-correlation pairs (|corr| > 0.90) to eliminate multicollinearity. Enforces code-level self-check preventing `month` or `fraud_bool` from leaking into feature columns. | `dataset_path`, `high_correlation_pairs` | `train_set_path`, `eval_set_path`, `feature_set_path`, `manifest` (`split_method`, `feature_columns`, `train_months`, `eval_months`) |
 | **MLAgent** | `agents/ml_agent.py` | Trains multiple candidate algorithms (Logistic Regression baseline, Random Forest, XGBoost, and PyTorch Tabular MLP). Conducts hyperparameter search for tree-based models on training holdouts without touching eval sets. Evaluates all candidates on fixed eval sets and selects winning model with grounded metric justification. | `train_set_path`, `eval_set_path` | `model_id`, `model_path`, `model_type`, `train_metrics`, `eval_metrics`, `candidates_considered`, `selection_reason` |
-| **CriticAgent** | `agents/critic_agent.py` | Rigorous, deterministic quality gatekeeper. Evaluates 15+ automated checks spanning 4 distinct categories (data integrity, modeling/leakage, experiment metric grounding, and algorithmic age fairness). Issues binary `approve` or `reject` verdict. | `data_validation_artifact`, `feature_engineering_artifact`, `model_training_artifact`, `eval_set_path`, `model_id` | `verdict` (`approve`/`reject`), `failed_checks`, `advisory_notes` |
+| **CriticAgent** | `agents/critic_agent.py` | Rigorous, deterministic quality gatekeeper. Evaluates 15+ automated checks spanning 4 distinct categories (data integrity, modeling/leakage, experiment metric grounding, and algorithmic age fairness). Issues binary `approve` or `reject` verdict. Leverages RAG to cite past failures. | `data_validation_artifact`, `feature_engineering_artifact`, `model_training_artifact`, `eval_set_path`, `model_id` | `verdict` (`approve`/`reject`), `failed_checks`, `advisory_notes`, `retrieved_similar_failures` |
 | **MLOpsAgent** | `agents/mlops_agent.py` | Deterministic model publisher. Verifies explicit Critic approval before publishing approved model bundle into the MLflow Model Registry under stage `Staging`. | `model_id`, `run_id`, `critic_verdict`, `registry_name` | `action` (`registered`), `model_id`, `registry_name`, `version`, `stage` (`Staging`) |
 
 ---
@@ -102,10 +114,10 @@ The single execution authority across the entire Argus platform is `pipeline.orc
 ┌─► [Evaluate Wall-Clock Timeout (Default: 1800s)] ──── Exceeded? ──► [Fail Pipeline]
 │  │
 │  ▼
-│  [Check Agent Registry for current_stage] ─────────── Missing? ───► [Fail Pipeline]
+│  [Check Agent Registry for current_stage] ─────────── Missing? ──► [Fail Pipeline]
 │  │
 │  ▼
-│  [TaskGraph Dependency Validation] ────────────────── Missing? ───► [Fail Pipeline]
+│  [TaskGraph Dependency Validation] ────────────────── Missing? ──► [Fail Pipeline]
 │  │
 │  ▼
 │  [Assemble Stage Context & Inject Prior Artifacts]
@@ -121,27 +133,27 @@ The single execution authority across the entire Argus platform is `pipeline.orc
 │  │   If AgentOutput.status == 'needs_retry' or verdict == 'reject':
 │  │      Route via _determine_critic_retry_target(failed_checks)
 │  │      Increment target stage retry count
-│  │      If retry count > MAX_RETRIES_PER_STAGE (3) ──────────────► [Fail Pipeline]
+│  │      If retry count > MAX_RETRIES_PER_STAGE (3) ────────────────► [Fail Pipeline]
 │  │      Enrich target stage context with failed checks & feedback
 │  │      Set state.current_stage = target_stage
-│  │      LOOP BACK ───────────────────────────────────────────────┘
+│  │      LOOP BACK ──────────────────────────────────────────────────┘
 │  │
 │  ├── If AgentOutput.status == 'success':
 │  │   Record stage_artifacts[output_artifact_key]
 │  │   Advance via TaskGraph.get_next_stage(current_stage)
 │  │   If next_stage is None:
-│  │      Build final report -> state.status = 'completed' ────────► [Complete Pipeline]
+│  │      Build final report -> state.status = 'completed' ──────────► [Complete Pipeline]
 │  │   Else:
 │  │      Set state.current_stage = next_stage
-│  │      LOOP BACK ───────────────────────────────────────────────┘
+│  │      LOOP BACK ──────────────────────────────────────────────────┘
 │  │
 │  ├── If AgentOutput.status == 'needs_retry':
 │  │   Increment current_stage retry count
-│  │   If retry count > MAX_RETRIES_PER_STAGE (3) ────────────────► [Fail Pipeline]
+│  │   If retry count > MAX_RETRIES_PER_STAGE (3) ───────────────────► [Fail Pipeline]
 │  │   Enrich stage context with errors & rationale
-│  │   LOOP BACK ──────────────────────────────────────────────────┘
+│  │   LOOP BACK ─────────────────────────────────────────────────────┘
 │  │
-│  └── If AgentOutput.status == 'failure': ────────────────────────► [Fail Pipeline]
+│  └── If AgentOutput.status == 'failure': ──────────────────────────► [Fail Pipeline]
 ```
 
 ### Global State Contracts (`agents/contracts.py`)
@@ -189,24 +201,28 @@ When routed backward, the destination agent receives enriched context in `stage_
 - `failed_checks`: Structured list of every check that failed, including `check_name`, `category`, `expected`, `actual`, and `reason`.
 - `retry_attempt`: Current retry count against the stage budget (`MAX_RETRIES_PER_STAGE = 3`).
 
+### RAG (Retrieval-Augmented Generation)
+To make Critic rejections explainable, the `CriticAgent` uses the `retrieval_mcp` server. When a rejection occurs, it queries `retrieve_similar_failures`. This server searches a local FAISS/NumPy vector index built from past MLflow `critic_failed_checks`. If a match is found with a similarity score > 0.0, the past run ID and reason are appended to the Critic's rationale, allowing the system to identify recurring failure patterns.
+
 ---
 
 ## 6. MCP Architecture: Tools and Permissions
 
-Argus implements tool access via the Model Context Protocol (MCP) using a unified `MCPClient` (`mcp_servers/client.py`) and three dedicated servers. Tool specs are wrapped such that LLM tool calls execute via standard JSON-RPC over stdio or internal dispatch.
+Argus implements tool access via the Model Context Protocol (MCP) using a unified `MCPClient` (`mcp_servers/client.py`) and four dedicated servers. Tool specs are wrapped such that LLM tool calls execute via standard JSON-RPC over stdio or internal dispatch.
 
 ### Server Scoping and Tool Permissions
 
 | MCP Server | Server Module | Registered Tools | Description & Security Enforcement |
 | :--- | :--- | :--- | :--- |
-| **Data MCP** | `mcp_servers/data_mcp/server.py` | `load_dataset`<br/>`inspect_dataset`<br/>`run_sql`<br/>`validate_dataset`<br/>`run_eda` | Ingests BAF variants and computes data profiles. `run_sql` validates that queries are strictly read-only `SELECT` or `WITH` statements; destructive keywords (`DROP`, `DELETE`, `UPDATE`, `INSERT`, `ATTACH`, `PRAGMA`) and multi-statement queries are rejected. |
+| **Data MCP** | `mcp_servers/data_mcp/server.py` | `load_dataset`<br/>`load_dataset_from_path`<br/>`inspect_dataset`<br/>`run_sql`<br/>`validate_dataset`<br/>`run_eda` | Ingests BAF variants and computes data profiles. `run_sql` validates that queries are strictly read-only `SELECT` or `WITH` statements; destructive keywords (`DROP`, `DELETE`, `UPDATE`, `INSERT`, `ATTACH`, `PRAGMA`) and multi-statement queries are rejected. |
 | **ML MCP** | `mcp_servers/ml_mcp/server.py` | `create_features`<br/>`train_model`<br/>`search_hyperparams`<br/>`evaluate_model`<br/>`check_fairness`<br/>`save_model`<br/>`load_model`<br/>`register_model` | Handles feature engineering, model training (LR, RF, XGBoost, PyTorch MLP), hyperparameter tuning, evaluation (PR-AUC, Recall@5%FPR), age fairness calculations, and MLflow Model Registry publication. |
 | **System MCP** | `mcp_servers/system_mcp/server.py` | `run_python`<br/>`write_file`<br/>`read_file` | **Tightest locked-down server.**<br/>- `run_python`: Executes in an isolated subprocess with working directory pinned to `experiments/scratch/`, hard 5.0s timeout, AST inspection blocking socket/network imports (`socket`, `http`, `urllib`, `requests`, `aiohttp`, `httpx`), and a `sys.meta_path` import finder.<br/>- `write_file` / `read_file`: Scoped strictly to `experiments/runs/{task_id}/` with path-traversal rejection and a 50MB file size ceiling to prevent disk exhaustion. |
+| **Retrieval MCP** | `mcp_servers/retrieval_mcp/server.py` | `retrieve_similar_failures` | Read-only retrieval server. Queries a local embedding index (`data/retrieval/`) of past Critic failures. Accepts a query string and `k` results. Returns matching run IDs and `failed_checks`. |
 
 ### Least-Privilege Agent Grants
-- **`DataAgent`**: Granted only `load_dataset`, `validate_dataset`, `run_eda`, `inspect_dataset`, `run_sql`.
-- **`FeatureAgent`**: Granted only `create_features`, `run_python`.
-- **`MLAgent`**: Granted only `train_model`, `search_hyperparams`, `evaluate_model`, `save_model`, `load_model`.
+- **`DataAgent`**: Granted only `load_dataset`, `load_dataset_from_path`, `validate_dataset`, `run_eda`, `inspect_dataset`, `run_sql`.
+- **`FeatureAgent`**: Granted only `create_features`.
+- **`MLAgent`**: Granted only `train_model`, `search_hyperparams`, `evaluate_model`, `save_model`, `load_model`, `retrieve_similar_failures`.
 - **`CriticAgent`**: Granted **no direct tool calls**; audits provided artifacts deterministically in-process (using `check_fairness` directly).
 - **`MLOpsAgent`**: Granted **no direct tool calls**; executes `register_model` directly in-process upon verifying Critic approval.
 
@@ -217,7 +233,8 @@ Argus implements tool access via the Model Context Protocol (MCP) using a unifie
 1. **Retry Budgets**: Every stage maintains an isolated retry count in `state.retry_counts`. If any stage exceeds `MAX_RETRIES_PER_STAGE = 3` (either through autonomous retry requests or Critic rejections), the Orchestrator halts execution and marks the task `failed`.
 2. **Wall-Clock Timeout**: The Orchestrator enforces a hard maximum wall-clock timeout (default: 1800.0s).
    > *Limitation Note*: As documented in `pipeline/orchestrator.py`, the timeout guard is evaluated at stage loop boundaries. It prevents runaway retry-loop duration across stage transitions, but does not preemptively interrupt a long-running synchronous in-flight computation within an individual stage.
-3. **Structured Logging and Sensitive Data Redaction**: `pipeline/logging.py` provides structured JSON logging with recursive redaction of sensitive credentials (`api_key`, `token`, `secret`, `password`, `credentials`).
+3. **RAG Index Staleness**: The retrieval index must be manually rebuilt via `python -m tools.retrieval_tools build-all` to include recent failures.
+4. **Structured Logging and Sensitive Data Redaction**: `pipeline/logging.py` provides structured JSON logging with recursive redaction of sensitive credentials (`api_key`, `token`, `secret`, `password`, `credentials`).
 
 ---
 
@@ -225,42 +242,44 @@ Argus implements tool access via the Model Context Protocol (MCP) using a unifie
 
 ```
 argus-ml/
-├── agents/                  # Autonomous domain agents and runtime
-│   ├── base.py              # Base Agent loop, turn management, and error catching
-│   ├── contracts.py         # Pydantic data contracts (AgentInput, AgentOutput, TaskState)
-│   ├── data_agent.py        # Data ingestion, validation, and EDA agent
-│   ├── feature_agent.py     # Temporal feature engineering agent
-│   ├── ml_agent.py          # Model training, hyperparameter tuning, and selection agent
-│   ├── critic_agent.py      # Deterministic multi-category audit agent
-│   ├── mlops_agent.py       # MLflow model registration agent
-│   └── llm.py               # LLM abstraction (OpenAI/Anthropic/Gemini) & MockLLMClient
-├── pipeline/                # Orchestration and task execution graph
-│   ├── orchestrator.py      # Single pipeline execution state machine
-│   ├── task_graph.py        # Declarative PIPELINE_STAGES & TaskGraph dependency validator
-│   ├── config.py            # Global Settings, timeouts, and MAX_RETRIES_PER_STAGE
-│   └── logging.py           # Structured JSON logger with regex-based credential redaction
-├── tools/                   # Tool implementations
-│   ├── data_tools.py        # Data loading, validation, EDA, SQLite SQL tools
-│   ├── ml_tools.py          # Feature creation, training (LR/RF/XGB/Torch), eval, fairness, MLflow
-│   └── system_tools.py      # Sandboxed run_python, scoped read_file and write_file
-├── mcp_servers/             # Model Context Protocol servers and client router
-│   ├── client.py            # Unified MCPClient routing tools to servers
-│   ├── data_mcp/            # Data MCP server
-│   ├── ml_mcp/              # ML MCP server
-│   └── system_mcp/          # System MCP server (sandboxed execution)
-├── serving/                 # Real-time production serving
-│   ├── api.py               # FastAPI application (/health, /model-info, /predict)
-│   └── Dockerfile           # Production container definition
-├── monitoring/              # Production reliability and drift detection
-│   └── monitor.py           # Latency, prediction drift, feature PSI, delayed PR-AUC degradation
-├── skills/                  # Composable multi-tool workflow skills
-│   ├── loader.py            # Skill manifest discovery and JSON loader
-│   └── schema.py            # Declarative SkillManifest schema
-├── eval/                    # Adversarial evaluation harness
-│   └── agent_eval/          # 10 adversarial scenarios, rubric scoring, and reporting
-├── tests/                   # Comprehensive unit and integration test suite
-└── docs/                    # Architecture and design documentation
-    ├── architecture.md      # System architecture specification
-    └── design-doc.md        # Methodological and engineering design documentation
+├── app.py                 # Streamlit web interface for UI & CSV upload
+├── app_handlers.py        # Deterministic demo handler for the UI pipeline
+├── agents/                # Autonomous domain agents and runtime
+│   ├── base.py            # Base Agent loop, turn management, and error catching
+│   ├── contracts.py       # Pydantic data contracts (AgentInput, AgentOutput, TaskState)
+│   ├── data_agent.py      # Data ingestion, validation, and EDA agent
+│   ├── feature_agent.py   # Temporal feature engineering agent
+│   ├── ml_agent.py        # Model training, hyperparameter tuning, and selection agent
+│   ├── critic_agent.py    # Deterministic multi-category audit agent
+│   ├── mlops_agent.py     # MLflow model registration agent
+│   ├── llm.py             # LLM abstraction & MockLLMClient
+│   └── llm_groq.py        # Live Groq LLM adapter
+├── pipeline/              # Orchestration and task execution graph
+│   ├── orchestrator.py    # Single pipeline execution state machine
+│   ├── task_graph.py      # Declarative PIPELINE_STAGES & TaskGraph dependency validator
+│   ├── config.py          # Global Settings, timeouts, and MAX_RETRIES_PER_STAGE
+│   └── logging.py         # Structured JSON logger with regex-based credential redaction
+├── tools/                 # Tool implementations
+│   ├── data_tools.py      # Data loading, validation, EDA, SQLite SQL tools
+│   ├── ml_tools.py        # Feature creation, training, eval, fairness, MLflow
+│   ├── retrieval_tools.py # Corpus building, embedding index, RAG retrieval
+│   └── system_tools.py    # Sandboxed run_python, scoped read_file and write_file
+├── mcp_servers/           # Model Context Protocol servers and client router
+│   ├── client.py          # Unified MCPClient routing tools to servers
+│   ├── data_mcp/          # Data MCP server
+│   ├── ml_mcp/            # ML MCP server
+│   ├── retrieval_mcp/     # RAG Retrieval MCP server
+│   └── system_mcp/        # System MCP server (sandboxed execution)
+├── serving/               # Real-time production serving
+│   ├── api.py             # FastAPI application (/health, /model-info, /predict)
+│   └── Dockerfile         # Production container definition
+├── monitoring/            # Production reliability and drift detection
+│   └── monitor.py         # Latency, prediction drift, feature PSI, delayed PR-AUC degradation
+├── eval/                  # Adversarial evaluation harness
+│   └── agent_eval/        # 10 adversarial scenarios, rubric scoring, and reporting
+├── tests/                 # Comprehensive unit and integration test suite
+└── docs/                  # Architecture and design documentation
+    ├── architecture.md    # System architecture specification
+    ├── design-doc.md      # Methodological and engineering design documentation
+    └── deepdive.md        # Combined project deepdive & interview defense
 ```
-
