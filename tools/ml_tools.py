@@ -716,16 +716,14 @@ def search_hyperparams(
 
 
 def evaluate_model(
-    model_id: str,
-    eval_set_path: str,
-    metrics: list[str] | None = None,
+        model_id: str,
+        eval_set_path: str,
+        metrics: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Evaluate a trained model on an evaluation feature set using the unified bundle.
+    """Evaluate a trained model and return scores, including CM and ROC for reporting."""
+    from sklearn.metrics import confusion_matrix, roc_curve, auc
+    import numpy as np
 
-    Metrics always include:
-      - 'pr_auc': Area under the Precision-Recall curve
-      - 'recall_at_fixed_fpr': Recall at fixed 5% False Positive Rate (FPR=0.05)
-    """
     model_path = MODELS_DIR / f"{model_id}.joblib"
     meta_path = MODELS_DIR / f"{model_id}_meta.json"
 
@@ -739,7 +737,6 @@ def evaluate_model(
     with open(meta_path, "r", encoding="utf-8") as f:
         metadata = json.load(f)
 
-    # Load unified bundle
     bundle_data = joblib.load(model_path)
     if isinstance(bundle_data, dict) and "model" in bundle_data:
         model = bundle_data["model"]
@@ -749,18 +746,13 @@ def evaluate_model(
         scaler = None
 
     eval_df = pd.read_csv(eval_path)
-
-    if "fraud_bool" not in eval_df.columns:
-        raise ValueError("model_not_found: Target column 'fraud_bool' missing in evaluation set.")
-
     feature_cols = metadata.get("feature_columns", [])
     if not feature_cols:
-        feature_cols = [c for c in eval_df.columns if c not in ("fraud_bool", "month")]
+        feature_cols = [c for c in eval_df.columns if c not in ("fraud_bool", "month", "customer_age")]
 
     X_eval = eval_df[feature_cols].fillna(0)
     y_eval = eval_df["fraud_bool"]
 
-    # Transform with the fitted training scaler without refitting
     if scaler is not None:
         X_eval_transformed = scaler.transform(X_eval)
     else:
@@ -773,58 +765,44 @@ def evaluate_model(
         y_proba = y_pred
 
     requested_metrics = [m.lower() for m in (metrics or ["precision", "recall", "pr_auc", "recall_at_fixed_fpr"])]
-    supported = {"precision", "recall", "pr_auc", "accuracy", "recall_at_fixed_fpr"}
-
-    for m in requested_metrics:
-        if m not in supported:
-            raise ValueError(f"metric_not_supported: Metric '{m}' is not supported. Supported: {list(supported)}")
-
-    scores: dict[str, float] = {}
+    scores: dict[str, Any] = {}  # Changed from float to Any to hold arrays
 
     if "precision" in requested_metrics:
         scores["precision"] = float(round(precision_score(y_eval, y_pred, zero_division=0), 4))
-
     if "recall" in requested_metrics:
         scores["recall"] = float(round(recall_score(y_eval, y_pred, zero_division=0), 4))
 
-    if "accuracy" in requested_metrics:
-        scores["accuracy"] = float(round(accuracy_score(y_eval, y_pred), 4))
-
-    # PR-AUC calculation (always enforced for fraud domain)
+    # PR-AUC
     prec_curve, rec_curve, _ = precision_recall_curve(y_eval, y_proba)
-    pr_auc_val = float(round(auc(rec_curve, prec_curve), 4))
-    scores["pr_auc"] = pr_auc_val
+    scores["pr_auc"] = float(round(auc(rec_curve, prec_curve), 4))
 
-    # Recall at fixed 5% FPR (FPR <= 0.05 operating point — always enforced)
+    # Recall @ 5% FPR
     fpr_arr, tpr_arr, _ = roc_curve(y_eval, y_proba)
     valid_indices = np.where(fpr_arr <= 0.05)[0]
-    if len(valid_indices) > 0:
-        recall_at_5pct = float(round(tpr_arr[valid_indices[-1]], 4))
-    else:
-        recall_at_5pct = 0.0
-    scores["recall_at_fixed_fpr"] = recall_at_5pct
+    scores["recall_at_fixed_fpr"] = float(round(tpr_arr[valid_indices[-1]], 4)) if len(valid_indices) > 0 else 0.0
 
-    # Log evaluation metrics to existing MLflow run
+    # --- NEW: Add Chart Data for the Report ---
+    cm = confusion_matrix(y_eval, y_pred)
+    scores["confusion_matrix"] = cm.tolist()
+
+    # Subsample ROC curve so JSON doesn't explode (max 100 points)
+    if len(fpr_arr) > 100:
+        idx = np.linspace(0, len(fpr_arr) - 1, 100).astype(int)
+        scores["roc_curve"] = {"fpr": fpr_arr[idx].tolist(), "tpr": tpr_arr[idx].tolist()}
+    else:
+        scores["roc_curve"] = {"fpr": fpr_arr.tolist(), "tpr": tpr_arr.tolist()}
+
+    # Log to MLflow
     _init_mlflow()
     run_id = metadata.get("run_id")
-    if not run_id:
-        try:
-            experiment = mlflow.get_experiment_by_name(EXPERIMENT_NAME)
-            if experiment:
-                runs = mlflow.search_runs(
-                    experiment_ids=[experiment.experiment_id],
-                    filter_string=f"tags.model_id = '{model_id}'",
-                )
-                if not runs.empty:
-                    run_id = runs.iloc[0]["run_id"]
-        except Exception:
-            pass
-
     if run_id:
         try:
             with mlflow.start_run(run_id=run_id):
-                for metric_name, val in scores.items():
-                    mlflow.log_metric(f"eval_{metric_name}", float(val))
+                # Log only scalar metrics to MLflow
+                mlflow.log_metric("eval_precision", scores.get("precision", 0))
+                mlflow.log_metric("eval_recall", scores.get("recall", 0))
+                mlflow.log_metric("eval_pr_auc", scores["pr_auc"])
+                mlflow.log_metric("eval_recall_at_5pct_fpr", scores["recall_at_fixed_fpr"])
         except Exception:
             pass
 

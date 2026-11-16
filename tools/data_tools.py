@@ -491,3 +491,37 @@ RUN_SQL_SPEC = ToolSpec(
     },
     handler=run_sql,
 )
+
+
+def load_dataset_from_path(dataset_path: str) -> dict[str, Any]:
+    """Load a BAF-format CSV from an explicit path (for uploads)."""
+    p = Path(dataset_path)
+    if not p.exists():
+        raise FileNotFoundError(f"file_not_found: Dataset path '{dataset_path}' does not exist.")
+    try:
+        df = pd.read_csv(p, nrows=5)
+    except Exception as exc:
+        raise ValueError(f"invalid_dataset: Could not read CSV: {exc}") from exc
+
+    required = {"fraud_bool", "month"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"invalid_dataset: Uploaded file is missing required BAF columns: {sorted(missing)}. "
+            "Upload a BAF-format CSV (must include 'fraud_bool' and 'month')."
+        )
+    return {"path": str(p.resolve()), "variant": "uploaded", "row_preview": len(df)}
+
+
+LOAD_DATASET_FROM_PATH_SPEC = ToolSpec(
+    name="load_dataset_from_path",
+    description="Loads a BAF-format dataset from an explicit file path.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "dataset_path": {"type": "string", "description": "Absolute path to the CSV file."}
+        },
+        "required": ["dataset_path"],
+    },
+    handler=load_dataset_from_path,
+)

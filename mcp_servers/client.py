@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 # Registry mapping tool names to owning MCP server
 TOOL_TO_SERVER_MAP: dict[str, str] = {
     "load_dataset": "data_mcp",
+    "load_dataset_from_path": "data_mcp",
     "inspect_dataset": "data_mcp",
     "run_sql": "data_mcp",
     "validate_dataset": "data_mcp",

@@ -1,10 +1,9 @@
 """Data MCP Server for Argus ML."""
 
 from __future__ import annotations
-
 from typing import Any
 from mcp.server.mcpserver import MCPServer
-from tools.data_tools import inspect_dataset, load_dataset, run_eda, run_sql, validate_dataset
+from tools.data_tools import inspect_dataset, load_dataset, load_dataset_from_path, run_eda, run_sql, validate_dataset
 
 data_mcp_server = MCPServer("data_mcp")
 
@@ -16,6 +15,14 @@ data_mcp_server = MCPServer("data_mcp")
 def mcp_load_dataset(variant: str) -> dict[str, Any]:
     """MCP tool wrapper for load_dataset."""
     return load_dataset(variant=variant)
+
+
+@data_mcp_server.tool(
+    name="load_dataset_from_path",
+    description="Loads a BAF CSV from a path."
+)
+def mcp_load_dataset_from_path(dataset_path: str) -> dict[str, Any]:
+    return load_dataset_from_path(dataset_path=dataset_path)
 
 
 @data_mcp_server.tool(

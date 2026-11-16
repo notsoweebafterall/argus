@@ -1,16 +1,17 @@
-"""Argus ML — Streamlit product surface (v1 + upload + visualizations).
-
-Run: streamlit run app.py
-"""
+"""Argus ML — Streamlit product surface (v1 + upload + HTML Reports)."""
 from __future__ import annotations
-
 import json
 import os
 import uuid
+import base64
+from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import roc_curve, auc
 
 from pipeline.orchestrator import run_task
 from agents.llm import MockLLMClient
@@ -21,227 +22,193 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 st.set_page_config(page_title="Argus ML", layout="wide", page_icon="🧠")
 st.title("Argus — Autonomous ML Engineering")
-st.caption("Upload a dataset, review its profile, and run an end-to-end ML workflow.")
+
 
 # ---------------------------------------------------------------------------
-# Sidebar
+# HTML Report Generation Helper
+# ---------------------------------------------------------------------------
+def generate_html_report(state, report, mlops, model_training, feature_eng, critic_rec):
+    eval_metrics = model_training.get("eval_metrics", {})
+    pr_auc = eval_metrics.get("pr_auc", 0)
+    rec = eval_metrics.get("recall_at_fixed_fpr", 0)
+
+    # Extract plot data from evaluate_model
+    cm = eval_metrics.get("confusion_matrix", [[0, 0], [0, 0]])
+    roc_data = eval_metrics.get("roc_curve", {"fpr": [], "tpr": []})
+
+    # Generate ROC Chart
+    roc_base64 = ""
+    if roc_data["fpr"]:
+        fig, ax = plt.subplots(figsize=(6, 4))
+        roc_auc = auc(roc_data["fpr"], roc_data["tpr"])
+        ax.plot(roc_data["fpr"], roc_data["tpr"], color='darkorange', lw=2, label=f'ROC curve (AUC = {roc_auc:.2f})')
+        ax.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+        ax.set_xlim([0.0, 1.0]);
+        ax.set_ylim([0.0, 1.05])
+        ax.set_xlabel('False Positive Rate');
+        ax.set_ylabel('True Positive Rate')
+        ax.set_title('Receiver Operating Characteristic');
+        ax.legend(loc="lower right")
+        buf = BytesIO();
+        fig.savefig(buf, format="png", bbox_inches="tight");
+        plt.close(fig)
+        roc_base64 = base64.b64encode(buf.getvalue()).decode()
+
+    # Generate Confusion Matrix Chart
+    cm_base64 = ""
+    if cm:
+        fig, ax = plt.subplots(figsize=(4, 3))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
+        ax.set_xlabel('Predicted');
+        ax.set_ylabel('Actual')
+        ax.set_title('Confusion Matrix')
+        buf = BytesIO();
+        fig.savefig(buf, format="png", bbox_inches="tight");
+        plt.close(fig)
+        cm_base64 = base64.b64encode(buf.getvalue()).decode()
+
+    # Build HTML
+    html = f"""
+    <html>
+    <head>
+        <title>Argus ML Report - {state.task_id}</title>
+        <style>
+            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 40px; color: #333; }}
+            h1, h2 {{ color: #1f77b4; }}
+            .card {{ background: #f9f9f9; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #eee; }}
+            .metric {{ font-size: 24px; font-weight: bold; color: #2ca02c; }}
+            table {{ border-collapse: collapse; width: 100%; margin-top: 10px; }}
+            th, td {{ text-align: left; padding: 8px; border-bottom: 1px solid #ddd; }}
+            th {{ background-color: #f2f2f2; }}
+            .flex {{ display: flex; gap: 40px; }}
+        </style>
+    </head>
+    <body>
+        <h1>Argus ML Validation Report</h1>
+        <p><strong>Task ID:</strong> {state.task_id} | <strong>Status:</strong> {state.status.upper()}</p>
+
+        <div class="card">
+            <h2>Executive Summary</h2>
+            <div class="flex">
+                <div>
+                    <p><strong>Winning Model:</strong> {mlops.get('model_id', 'N/A')} ({model_training.get('model_type', 'N/A')})</p>
+                    <p><strong>Critic Verdict:</strong> {critic_rec.output.artifact.get('verdict', 'N/A').upper()}</p>
+                    <p><strong>Eval PR-AUC:</strong> <span class="metric">{pr_auc:.4f}</span></p>
+                    <p><strong>Recall @ 5% FPR:</strong> <span class="metric">{rec:.4f}</span></p>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Performance Visuals</h2>
+            <div class="flex">
+                <div><img src="data:image/png;base64,{roc_base64}" style="max-width: 500px;"></div>
+                <div><img src="data:image/png;base64,{cm_base64}" style="max-width: 400px;"></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Critic Validation & RAG</h2>
+            <p>The deterministic Critic system issued a <strong>{critic_rec.output.artifact.get('verdict').upper()}</strong> verdict.</p>
+    """
+
+    # Add RAG citations
+    retrieved = critic_rec.output.artifact.get("retrieved_similar_failures", [])
+    if retrieved:
+        html += "<h3>Similar Past Failures Consulted (RAG):</h3><ul>"
+        for m in retrieved:
+            html += f"<li>Run <code>{m['run_id'][:8]}</code> (Similarity: {m['score']:.2f})</li>"
+        html += "</ul>"
+
+    html += """
+        </div>
+    </body>
+    </html>
+    """
+    return html.encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Sidebar & Upload
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.header("Configuration")
     source = st.radio("Data source", ["BAF variant", "Upload file"], horizontal=True)
-
     variant = None
     uploaded = None
     if source == "BAF variant":
         variant = st.selectbox("Dataset variant", ["Base", "I", "II", "III", "IV", "V"])
     else:
-        uploaded = st.file_uploader(
-            "Upload dataset",
-            type=["csv", "xlsx", "xls", "json"],
-            help="CSV, Excel, or JSON. Generic ingestion is being wired (v2); files are validated and previewed now.",
-        )
+        uploaded = st.file_uploader("Upload dataset", type=["csv"])
 
-    use_live_llm = st.checkbox("Use live LLM (Groq)", value=False)
     run_btn = st.button("Run ML Workflow", type="primary", use_container_width=True)
-    st.divider()
-    st.caption("Past runs: `mlflow ui`.")
 
-
-def _read_uploaded(uploaded) -> pd.DataFrame | None:
-    """Read an uploaded file into a DataFrame, or return None on failure."""
-    name = uploaded.name.lower()
-    try:
-        if name.endswith(".csv"):
-            return pd.read_csv(uploaded)
-        if name.endswith((".xlsx", ".xls")):
-            return pd.read_excel(uploaded)
-        if name.endswith(".json"):
-            return pd.read_json(uploaded)
-    except Exception as exc:
-        st.error(f"Could not parse {uploaded.name}: {exc}")
-        return None
-    st.error(f"Unsupported file type: {uploaded.name}")
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Upload path: validate + preview + save (honest about v2)
-# ---------------------------------------------------------------------------
 if source == "Upload file" and uploaded is not None:
     st.subheader("Dataset Upload")
-    df = _read_uploaded(uploaded)
-    if df is not None:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Rows", f"{len(df):,}")
-        c2.metric("Columns", len(df.columns))
-        c3.metric("Missing cells", int(df.isna().sum().sum()))
+    df = pd.read_csv(uploaded)
+    st.dataframe(df.head(10), use_container_width=True)
 
-        st.write("**Preview**")
-        st.dataframe(df.head(20), use_container_width=True)
-
-        st.write("**Column profile**")
-        profile = pd.DataFrame({
-            "column": df.columns,
-            "dtype": [str(t) for t in df.dtypes],
-            "nulls": df.isna().sum().values,
-            "null_pct": (df.isna().mean() * 100).round(1).values,
-            "unique": [df[c].nunique() for c in df.columns],
-        })
-        st.dataframe(profile, use_container_width=True)
-
-        target = st.selectbox("Confirm target column", df.columns, index=len(df.columns) - 1)
-        st.info(
-            "Generic ingestion (any CSV → full pipeline) is the v2 build: it needs a "
-            "configurable split column and target column in the DataAgent/feature layer. "
-            "For now, this validates and profiles your file; run a BAF variant to execute the pipeline."
-        )
-
-        if st.button("Save upload for v2 ingestion"):
+    has_baf_schema = {"fraud_bool", "month"}.issubset(set(df.columns))
+    if has_baf_schema:
+        st.success("BAF schema detected — this upload can run the full pipeline.")
+        if st.button("Run pipeline on this upload", type="primary"):
             dest = UPLOAD_DIR / f"{uuid.uuid4().hex[:8]}_{uploaded.name}"
             dest.write_bytes(uploaded.getbuffer())
-            st.success(f"Saved to {dest}. Target confirmed: `{target}`.")
+            app_handlers.reset()
+            app_handlers._state["upload_path"] = str(dest.resolve())
 
-# ---------------------------------------------------------------------------
-# Run path: BAF variant only (until v2 generic ingestion lands)
-# ---------------------------------------------------------------------------
-if run_btn:
-    if source == "Upload file":
-        st.warning(
-            "Generic CSV execution is v2. Pick a **BAF variant** in the sidebar to run the "
-            "pipeline now, or save your upload and come back after v2."
-        )
+            with st.status("Running Argus pipeline...", expanded=True) as status:
+                state = run_task("uploaded", llm_client=MockLLMClient(handler=app_handlers.demo_pipeline_handler))
+                status.update(label=f"Pipeline {state.status}", state="complete")
+            st.session_state["state"] = state
+            st.rerun()
     else:
-        # Set the variant on the handler's shared state BEFORE the run.
-        app_handlers.reset()
-        app_handlers._state["variant"] = variant
-
-        with st.status("Running Argus pipeline...", expanded=True) as status:
-            st.write("Data validation → Feature engineering → Model training → Critic review → MLOps")
-            state = run_task(
-                variant,
-                llm_client=MockLLMClient(handler=app_handlers.demo_pipeline_handler),
-            )
-            status.update(
-                label=f"Pipeline {state.status}",
-                state="complete" if state.status == "completed" else "error",
-            )
-        st.session_state["state"] = state
+        st.warning("Missing 'fraud_bool' and 'month'. Generic ingestion is coming in v2.")
 
 # ---------------------------------------------------------------------------
-# Results
+# Run Standard BAF Variant
+# ---------------------------------------------------------------------------
+if run_btn and source == "BAF variant":
+    app_handlers.reset()
+    app_handlers._state["variant"] = variant
+    with st.status("Running Argus pipeline...", expanded=True) as status:
+        state = run_task(variant, llm_client=MockLLMClient(handler=app_handlers.demo_pipeline_handler))
+        status.update(label=f"Pipeline {state.status}", state="complete")
+    st.session_state["state"] = state
+
+# ---------------------------------------------------------------------------
+# Results & Download
 # ---------------------------------------------------------------------------
 state = st.session_state.get("state")
 if state is None:
-    st.info("Pick a BAF variant (or upload to preview) and click **Run ML Workflow**.")
     st.stop()
 
-st.subheader("Execution Summary")
-st.metric("Status", state.status.upper())
-
-for rec in state.stage_history:
-    icon = {"success": "✅", "failure": "❌", "needs_retry": "⚠️"}.get(rec.output.status, "•")
-    with st.expander(f"{icon} {rec.stage} — {rec.output.status}"):
-        st.write(rec.output.rationale)
-        if rec.critic_verdict:
-            st.write(f"**Critic verdict:** `{rec.critic_verdict}`")
-        if rec.output.errors:
-            st.error("\n".join(rec.output.errors))
-
 critic_rec = next((r for r in state.stage_history if r.stage == "critic_review"), None)
-if critic_rec and critic_rec.output.artifact:
-    st.subheader("Critic Validation")
-    st.write(f"**Verdict:** `{critic_rec.output.artifact.get('verdict')}`")
-    failed = critic_rec.output.artifact.get("failed_checks", [])
-    if failed:
-        st.dataframe(failed, use_container_width=True)
-    retrieved = critic_rec.output.artifact.get("retrieved_similar_failures", [])
-    if retrieved:
-        st.subheader("Similar Past Failures (RAG)")
-        for m in retrieved:
-            st.write(f"Run `{str(m.get('run_id',''))[:8]}` — similarity {m.get('score',0):.2f}")
-            st.json(m.get("failed_checks", []))
-
-# ---------------------------------------------------------------------------
-# Visualizations (from existing artifacts — no backend change)
-# ---------------------------------------------------------------------------
-st.subheader("Visual Analysis")
-
-data_rec = next((r for r in state.stage_history if r.stage == "data_validation"), None)
-ml_rec = next((r for r in state.stage_history if r.stage == "model_training"), None)
-
-col_a, col_b = st.columns(2)
-
-# Class balance
-with col_a:
-    if data_rec and data_rec.output.artifact:
-        cb = (data_rec.output.artifact.get("validation") or {}).get("class_balance") or {}
-        if cb:
-            st.write("**Class balance**")
-            st.bar_chart({"count": {str(k): int(v) for k, v in cb.items()}})
-
-# Missingness (sentinel)
-with col_b:
-    if data_rec and data_rec.output.artifact:
-        sm = (data_rec.output.artifact.get("validation") or {}).get("sentinel_missing_counts") or {}
-        if sm:
-            st.write("**Sentinel-missing counts**")
-            st.bar_chart({"count": {str(k): int(v) for k, v in sm.items()}})
-
-# Model comparison
-if ml_rec and ml_rec.output.artifact:
-    candidates = ml_rec.output.artifact.get("candidates_considered") or []
-    if candidates:
-        st.write("**Model comparison (eval metrics)**")
-        rows = []
-        for c in candidates:
-            m = c.get("eval_metrics") or {}
-            rows.append({
-                "model": c.get("model_type", "?"),
-                "PR-AUC": m.get("pr_auc"),
-                "Recall@5%FPR": m.get("recall_at_fixed_fpr"),
-                "Precision": m.get("precision"),
-                "Recall": m.get("recall"),
-            })
-        st.dataframe(rows, use_container_width=True)
-        pr_auc_series = {r["model"]: r["PR-AUC"] for r in rows if r["PR-AUC"] is not None}
-        if pr_auc_series:
-            st.bar_chart({"PR-AUC": pr_auc_series})
-
-# RAG similarity
-if critic_rec and critic_rec.output.artifact:
-    retrieved = critic_rec.output.artifact.get("retrieved_similar_failures", [])
-    if retrieved:
-        st.write("**RAG similarity to past failures**")
-        sim_series = {
-            f"run {str(m.get('run_id',''))[:8]}": float(m.get("score", 0))
-            for m in retrieved
-        }
-        st.bar_chart({"similarity": sim_series})
-
-# ---------------------------------------------------------------------------
-# Model & Artifacts
-# ---------------------------------------------------------------------------
 report = state.final_report or {}
 mlops = report.get("mlops_registration") or {}
 model_training = report.get("model_training") or {}
 feature_eng = report.get("feature_engineering") or {}
 
-st.subheader("Model & Artifacts")
-c1, c2, c3 = st.columns(3)
-c1.metric("Model ID", mlops.get("model_id", "—"))
-c2.metric("Registry version", mlops.get("version", "—"))
-c3.metric("Stage", mlops.get("stage", "—"))
+st.subheader("Results")
+col1, col2, col3 = st.columns(3)
+col1.metric("Model ID", mlops.get("model_id", "—"))
+col2.metric("PR-AUC", model_training.get("eval_metrics", {}).get("pr_auc", "—"))
+col3.metric("Critic Verdict", critic_rec.output.artifact.get("verdict", "—") if critic_rec else "—")
 
-def _dl(label, path, mime, key):
-    if path and Path(path).exists():
-        st.download_button(label, Path(path).read_bytes(), file_name=Path(path).name,
-                           mime=mime, key=key, use_container_width=True)
-    else:
-        st.caption(f"{label}: not produced")
+st.subheader("Downloads")
+st.write("Generate a comprehensive HTML report containing charts, metrics, and validation results.")
+html_report = generate_html_report(state, report, mlops, model_training, feature_eng, critic_rec)
+st.download_button(
+    label="📄 Download Full HTML Report",
+    data=html_report,
+    file_name=f"Argus_Report_{state.task_id}.html",
+    mime="text/html",
+    type="primary",
+    use_container_width=True
+)
 
-_dl("Trained model (.joblib)", model_training.get("model_path"), "application/octet-stream", "dl_model")
-_dl("Evaluation data (.csv)", feature_eng.get("eval_set_path"), "text/csv", "dl_eval")
-st.download_button("Evaluation report (.json)",
-                   json.dumps(report, indent=2, default=str).encode(),
-                   file_name=f"argus_report_{state.task_id}.json",
-                   mime="application/json", key="dl_report", use_container_width=True)
+# Raw artifacts
+st.write("Raw Artifacts:")
+if model_training.get("model_path") and Path(model_training["model_path"]).exists():
+    st.download_button("Trained Model (.joblib)", Path(model_training["model_path"]).read_bytes(),
+                       file_name="model.joblib")
