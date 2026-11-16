@@ -65,3 +65,7 @@ artifacts/
 .DS_Store
 Thumbs.db
 
+# Retrieval index (regenerable: python -m tools.retrieval_tools build-all)
+data/retrieval/
+# User uploads
+data/uploads/
