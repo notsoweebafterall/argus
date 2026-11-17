@@ -1,6 +1,5 @@
 # Argus ML
 
-app : https://argus-ml.streamlit.app/
 Argus is a multi-agent machine learning system. It takes a dataset, runs it through a full ML pipeline (validation, feature engineering, training, criticism, and deployment), and outputs a model. It is built for the Bank Account Fraud (BAF) dataset but is designed to be extended to other tabular datasets.
 
 ## What it does
